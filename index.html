@@ -832,6 +832,11 @@ button:focus-visible,a:focus-visible,select:focus-visible,input:focus-visible,la
 .ob-field label{display:block;font-size:13.5px;font-weight:600;color:var(--ink);margin-bottom:7px}
 .ob-field .f-sub{display:block;font-size:12px;color:var(--muted);font-weight:400;margin-top:3px}
 .ob-field input,.ob-field select{width:100%;border:1px solid var(--ring);border-radius:10px;padding:12px;background:var(--page);color:var(--ink);font-size:15px}
+/* iOS WebKit draws an empty date field with nothing in it (Chrome and desktop print a format hint), so give it a cue there only. */
+@supports (-webkit-touch-callout: none){
+  input[type=date].date-empty::before{content:attr(placeholder);color:var(--muted)}
+  input[type=date].date-empty:focus::before{content:none}
+}
 .ob-note{display:flex;flex-direction:column;gap:11px;width:100%;max-width:34ch;text-align:left}
 .ob-note div{font-size:14px;color:var(--ink);line-height:1.45}
 .ob-actions{display:flex;flex-direction:column;gap:9px;width:100%;max-width:34ch;margin-top:6px}
@@ -3224,7 +3229,7 @@ const TODAY = todayISO();
 document.addEventListener("visibilitychange", () => {
   if (!document.hidden && todayISO() !== TODAY) location.reload();
 });
-const BUILD_ID = "2026-07-23.42";
+const BUILD_ID = "2026-07-23.43";
 const CURRENT_MONTH = TODAY.slice(0, 7);
 
 /* ---- i18n: follows the device language by default; the core experience is
@@ -4510,7 +4515,7 @@ function Onboarding({ settings, setSetting, setTab }) {
             /* @__PURE__ */ React.createElement("button", { type: "button", className: iMode === "hourly" ? "on" : "", "aria-pressed": iMode === "hourly", onClick: () => setIMode("hourly") }, "Hourly"),
             /* @__PURE__ */ React.createElement("button", { type: "button", className: iMode === "freelance" ? "on" : "", "aria-pressed": iMode === "freelance", onClick: () => setIMode("freelance") }, "Freelance"))),
         /* @__PURE__ */ React.createElement("div", { className: "ob-field" }, /* @__PURE__ */ React.createElement("label", null, "Never let my bank drop below", /* @__PURE__ */ React.createElement("span", { className: "f-sub" }, "We'll warn you before a buy crosses it.")), /* @__PURE__ */ React.createElement("input", { type: "number", inputMode: "decimal", placeholder: "$  e.g. 200", value: floor, onChange: (e) => setFloor(e.target.value) })),
-        iMode !== "freelance" && /* @__PURE__ */ React.createElement("div", { className: "ob-field" }, /* @__PURE__ */ React.createElement("label", null, "Next payday", /* @__PURE__ */ React.createElement("span", { className: "f-sub" }, "Powers “days until payday” on Home.")), /* @__PURE__ */ React.createElement("input", { type: "date", value: payDate, onChange: (e) => setPayDate(e.target.value) }), /* @__PURE__ */ React.createElement("select", { value: sched, onChange: (e) => setSched(e.target.value), style: { marginTop: 8 } }, /* @__PURE__ */ React.createElement("option", { value: "weekly" }, "Weekly"), /* @__PURE__ */ React.createElement("option", { value: "biweekly" }, "Every 2 weeks"), /* @__PURE__ */ React.createElement("option", { value: "semimonthly" }, "Twice a month"), /* @__PURE__ */ React.createElement("option", { value: "monthly" }, "Monthly"))),
+        iMode !== "freelance" && /* @__PURE__ */ React.createElement("div", { className: "ob-field" }, /* @__PURE__ */ React.createElement("label", null, "Next payday", /* @__PURE__ */ React.createElement("span", { className: "f-sub" }, "Powers “days until payday” on Home.")), /* @__PURE__ */ React.createElement("input", { type: "date", className: payDate ? void 0 : "date-empty", placeholder: "Pick a date", value: payDate, onChange: (e) => setPayDate(e.target.value) }), /* @__PURE__ */ React.createElement("select", { value: sched, onChange: (e) => setSched(e.target.value), style: { marginTop: 8 } }, /* @__PURE__ */ React.createElement("option", { value: "weekly" }, "Weekly"), /* @__PURE__ */ React.createElement("option", { value: "biweekly" }, "Every 2 weeks"), /* @__PURE__ */ React.createElement("option", { value: "semimonthly" }, "Twice a month"), /* @__PURE__ */ React.createElement("option", { value: "monthly" }, "Monthly"))),
         iMode === "hourly" && /* @__PURE__ */ React.createElement("div", { className: "ob-field" }, /* @__PURE__ */ React.createElement("label", null, "Hourly rate × hours", /* @__PURE__ */ React.createElement("span", { className: "f-sub" }, "Optional — estimates your typical check.")),
           /* @__PURE__ */ React.createElement("div", { style: { display: "flex", gap: 8 } },
             /* @__PURE__ */ React.createElement("input", { type: "number", inputMode: "decimal", placeholder: "$/hr", value: hrRate, onChange: (e) => setHrRate(e.target.value), style: { flex: 1 } }),
@@ -7201,6 +7206,8 @@ function Settings(p) {
       "input",
       {
         type: "date",
+        className: pay.payDate ? void 0 : "date-empty",
+        placeholder: "Pick a date",
         style: { width: 150 },
         defaultValue: pay.payDate || "",
         onChange: (e) => applyPaycheck({ payDate: e.target.value })
