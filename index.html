@@ -1196,7 +1196,7 @@ function(a,b,c){if(!Vd(b))throw Error(m(200));return Wd(null,a,b,!1,c)};Q.unmoun
     var n = (Math.abs(cents) / 100).toLocaleString("en-US", {
       minimumFractionDigits: 2, maximumFractionDigits: 2,
     });
-    return (cents < 0 ? "-$" : "$") + n;
+    return (cents < 0 ? "\u2212\u2060$" : "$") + n;
   }
 
   /* ---------- dates (§8 derive Month from LOCAL components) ---------- */
@@ -3177,7 +3177,7 @@ const TODAY = todayISO();
 document.addEventListener("visibilitychange", () => {
   if (!document.hidden && todayISO() !== TODAY) location.reload();
 });
-const BUILD_ID = "2026-07-23.39";
+const BUILD_ID = "2026-07-23.40";
 const CURRENT_MONTH = TODAY.slice(0, 7);
 
 /* ---- i18n: follows the device language by default; the core experience is
@@ -3329,7 +3329,7 @@ function tr(key) {
 const money = (cents) => C.fmt(cents);
 function fmt0(cents) {
   const n = Math.round(Math.abs(cents) / 100).toLocaleString("en-US");
-  return (cents < 0 ? "-$" : "$") + n;
+  return (cents < 0 ? "\u2212\u2060$" : "$") + n;
 }
 function MoneySplit({ cents, className }) {
   const str = money(cents);
@@ -6280,6 +6280,8 @@ function SimpleHome(p) {
   }, [v && v.verdict]);
   const periodTail = payHorizon ? "until payday" : "this month";
   const periodDaysN = payHorizon ? daysToPay : daysRemaining;
+  // A negative figure never reads as one on a phone (the sign wraps away); say it in words.
+  const shortfall = (c) => c < 0 ? money(-c) + " short" : money(c) + " left";
   const copy = v && {
     bank: {
       ic: "\u2715",
@@ -6317,8 +6319,8 @@ function SimpleHome(p) {
       ic: "\u2715",
       head: tr("v_stash"),
       sub: payHorizon
-        ? "It would tip you red \u2014 at your pace you'd hit payday around " + money(v.projAfter) + "."
-        : "It would tip the month red \u2014 at your pace you'd end " + monthLabel(month) + " around " + money(v.projAfter) + "."
+        ? "It would tip you into the red \u2014 at your pace you'd be " + shortfall(v.projAfter) + " at payday."
+        : "It would tip the month into the red \u2014 at your pace you'd end " + monthLabel(month) + " " + shortfall(v.projAfter) + "."
     },
     mostleft: {
       ic: "\u25B3",
@@ -6329,8 +6331,8 @@ function SimpleHome(p) {
       ic: "\u25B3",
       head: tr("v_yourcall"),
       sub: payHorizon
-        ? "You're already trending negative \u2014 on pace for around " + money(projectedAtPay == null ? 0 : projectedAtPay) + " at payday, before this."
-        : monthLabel(month) + " is already trending negative \u2014 around " + money(projectedEnd == null ? 0 : projectedEnd) + " before this."
+        ? "You're already on pace to be " + shortfall(projectedAtPay == null ? 0 : projectedAtPay) + " at payday \u2014 before this."
+        : monthLabel(month) + " is already on pace to end " + shortfall(projectedEnd == null ? 0 : projectedEnd) + " \u2014 before this."
     },
     bigday: {
       ic: "\u25B3",
