@@ -1614,6 +1614,18 @@ function(a,b,c){if(!Vd(b))throw Error(m(200));return Wd(null,a,b,!1,c)};Q.unmoun
       out.reservedAfter = reserved;
       return hard("reserved");
     }
+    // Hard conditions first: already on pace to be short, or the bank about
+    // to slip under next month's bills. A want never gets a softer answer
+    // from a check further down when one of these is true.
+    if (projectedEnd != null && projectedEnd < Math.min(0, -((perDay || 0) * 3 * (L - 1)))) {
+      return hard("trend");
+    }
+    // future outlook: the month can look fine while the BANK slips under
+    // what next month's bills need — warn before the float breaks
+    if (!isEmergency && x.bank != null && x.billsMonthly > 0 && x.bank - amount < x.billsMonthly) {
+      out.bankAfter = x.bank - amount;
+      return hard("float");
+    }
     // wants crossing under the runway target warn even when the month is fine
     if (L <= 1 && x.cushion != null && x.burn > 0 && x.targetRunway > 0) {
       var rb = x.cushion / x.burn, ra = (x.cushion - amount) / x.burn;
@@ -1630,12 +1642,6 @@ function(a,b,c){if(!Vd(b))throw Error(m(200));return Wd(null,a,b,!1,c)};Q.unmoun
       var spendable = x.bank - effFloor;
       if (spendable > 0 && amount > spendable * 0.28 * L * g) return soft("want");
     }
-    // future outlook: the month can look fine while the BANK slips under
-    // what next month's bills need — warn before the float breaks
-    if (!isEmergency && x.bank != null && x.billsMonthly > 0 && x.bank - amount < x.billsMonthly) {
-      out.bankAfter = x.bank - amount;
-      return hard("float");
-    }
     // soft warnings: time-aware when daysLeft is known, original rules if not
     var hasDays = x.daysLeft >= 1 && perDay != null && perDay > 0;
     if (hasDays) {
@@ -1643,9 +1649,6 @@ function(a,b,c){if(!Vd(b))throw Error(m(200));return Wd(null,a,b,!1,c)};Q.unmoun
       if (out.perDayAfter < perDay * (0.5 / L) * firm) return soft("squeeze");
     } else if (leftThisMonth > 0 && leftAfter < leftThisMonth * (0.2 / L) * firm) {
       return soft("mostleft");
-    }
-    if (projectedEnd != null && projectedEnd < Math.min(0, -((perDay || 0) * 3 * (L - 1)))) {
-      return hard("trend");
     }
     if (!hasDays && perDay != null && perDay > 0 && amount > perDay * 3 * L / firm) {
       return soft("bigday");
@@ -3020,6 +3023,8 @@ function(a,b,c){if(!Vd(b))throw Error(m(200));return Wd(null,a,b,!1,c)};Q.unmoun
       (function () { var r = C.simpleVerdict(C.c(50), C.c(100), -C.c(800), C.c(5), 2); return r.verdict + "/" + r.reason + "/" + r.tier; })(), "AMBER/trend/hard");
     eq("dipping into bill money => a want is RED/reserved",
       C.simpleVerdict(C.c(100), C.c(2000), C.c(1500), C.c(40), 0.7, { bank: C.c(500), floor: 0, reserved: C.c(450) }).verdict, "RED");
+    eq("already short beats the per-day squeeze: want is RED/trend",
+      (function () { var r = C.simpleVerdict(C.c(50), C.c(100), -C.c(800), C.c(5), 0.7, { daysLeft: 22 }); return r.verdict + "/" + r.reason; })(), "RED/trend");
     eq("a big-slice want is soft tier",
       C.simpleVerdict(C.c(600), C.c(3000), C.c(2500), C.c(80), 0.7, { bank: C.c(1500), floor: 0 }).tier, "soft");
     /* no bank: bills still due are held back before anything is safe to spend */
@@ -3219,7 +3224,7 @@ const TODAY = todayISO();
 document.addEventListener("visibilitychange", () => {
   if (!document.hidden && todayISO() !== TODAY) location.reload();
 });
-const BUILD_ID = "2026-07-23.41";
+const BUILD_ID = "2026-07-23.42";
 const CURRENT_MONTH = TODAY.slice(0, 7);
 
 /* ---- i18n: follows the device language by default; the core experience is
