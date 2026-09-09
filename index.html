@@ -1507,10 +1507,18 @@ function(a,b,c){if(!Vd(b))throw Error(m(200));return Wd(null,a,b,!1,c)};Q.unmoun
   /* ---------- month-end projection (variable spending paced) ----------
      Auto entries (income/bills/savings) land in full on the 1st, so only
      VARIABLE spending gets paced across the month (§8: no scare numbers). */
-  function projectMonthEnd(netNow, variableSpendMTD, daysElapsed, daysInMo) {
+  function projectMonthEnd(netNow, variableSpendMTD, daysElapsed, daysInMo, typicalMonthly) {
     if (daysElapsed <= 0) return netNow;
     var daysLeft = Math.max(0, daysInMo - daysElapsed);
-    return Math.round(netNow - (variableSpendMTD / daysElapsed) * daysLeft);
+    var daily = variableSpendMTD / daysElapsed;
+    // The first days of a month are a thin sample — one big buy on the 2nd
+    // projects a catastrophe. Blend toward the typical daily burn until a
+    // week of data exists.
+    if (typicalMonthly > 0 && daysElapsed < 7) {
+      var w = daysElapsed / 7;
+      daily = w * daily + (1 - w) * (typicalMonthly / 30);
+    }
+    return Math.round(netNow - daily * daysLeft);
   }
 
   /* ---------- simple-mode verdict: this month + pace + per-day ----------
@@ -1541,11 +1549,21 @@ function(a,b,c){if(!Vd(b))throw Error(m(200));return Wd(null,a,b,!1,c)};Q.unmoun
   function simpleVerdict(amount, leftThisMonth, projectedEnd, perDay, leniency, ctx) {
     var L = (leniency && leniency > 0) ? leniency : 1;
     var x = ctx || {};
+    // No bank connected: bills still due are held back before anything is
+    // called safe to spend — the same hold a connected bank gets via `reserved`.
+    var heldManual = x.bank == null && x.heldManual > 0 ? x.heldManual : 0;
+    if (heldManual) { leftThisMonth -= heldManual; if (projectedEnd != null) projectedEnd -= heldManual; }
     var leftAfter = leftThisMonth - amount;
     var projAfter = projectedEnd == null ? null : projectedEnd - amount;
     var out = { leftAfter: leftAfter, projAfter: projAfter, leniency: L,
       bank: x.bank != null ? x.bank : null, bankAfter: null, netAfter: null, runwayAfter: null, perDayAfter: null };
     var done = function (v, r) { out.verdict = v; out.reason = r; return out; };
+    out.heldManual = heldManual;
+    // Two kinds of amber. Soft: the math works but it costs something you can
+    // see. Hard: you are already short, or this spends money that is spoken
+    // for — a want is never "your call" there, it is a stash.
+    var soft = function (r) { out.tier = "soft"; return done("AMBER", r); };
+    var hard = function (r) { out.tier = "hard"; return done(L < 1 ? "RED" : "AMBER", r); };
     var paceTip = projAfter != null && projectedEnd >= 0 && projAfter < 0;
     // user-set balance floor: never let the bank drop below it (0 = the
     // literal empty-account floor)
@@ -1571,6 +1589,8 @@ function(a,b,c){if(!Vd(b))throw Error(m(200));return Wd(null,a,b,!1,c)};Q.unmoun
     var phi = 0.45 * runwayScore + 0.30 * stabilityScore + 0.20 * bufferScore + 0.05 * trajScore;
     out.phi = phi;
     out.stance = phi < 0.34 ? "survival" : phi < 0.67 ? "building" : "growth";
+    // In survival stance the soft warnings fire sooner. Never looser elsewhere.
+    var firm = out.stance === "survival" ? 1.3 : 1;
     // strictness g: <1 tightens discretionary limits (survival), >1 loosens them
     // (growth). Calibrated so a middle Φ (~0.5) reproduces today's behavior.
     var g = 0.6 + 0.8 * phi;
@@ -1592,14 +1612,14 @@ function(a,b,c){if(!Vd(b))throw Error(m(200));return Wd(null,a,b,!1,c)};Q.unmoun
     // due this month — a "your call", not a block (income may land first)
     if (!isEmergency && reserved > 0 && x.bank != null && (x.bank - amount) < effFloor) {
       out.reservedAfter = reserved;
-      return done("AMBER", "reserved");
+      return hard("reserved");
     }
     // wants crossing under the runway target warn even when the month is fine
     if (L <= 1 && x.cushion != null && x.burn > 0 && x.targetRunway > 0) {
       var rb = x.cushion / x.burn, ra = (x.cushion - amount) / x.burn;
       if (rb >= x.targetRunway && ra < x.targetRunway) {
         out.runwayAfter = ra;
-        return done("AMBER", "dent");
+        return soft("dent");
       }
     }
     // discretionary restraint: a want that eats a big slice of your spendable
@@ -1608,27 +1628,27 @@ function(a,b,c){if(!Vd(b))throw Error(m(200));return Wd(null,a,b,!1,c)};Q.unmoun
     // block — just a nudge to sit with a large discretionary buy.
     if (L < 1 && x.bank != null) {
       var spendable = x.bank - effFloor;
-      if (spendable > 0 && amount > spendable * 0.28 * L * g) return done("AMBER", "want");
+      if (spendable > 0 && amount > spendable * 0.28 * L * g) return soft("want");
     }
     // future outlook: the month can look fine while the BANK slips under
     // what next month's bills need — warn before the float breaks
     if (!isEmergency && x.bank != null && x.billsMonthly > 0 && x.bank - amount < x.billsMonthly) {
       out.bankAfter = x.bank - amount;
-      return done("AMBER", "float");
+      return hard("float");
     }
     // soft warnings: time-aware when daysLeft is known, original rules if not
     var hasDays = x.daysLeft >= 1 && perDay != null && perDay > 0;
     if (hasDays) {
       out.perDayAfter = Math.floor(leftAfter / x.daysLeft);
-      if (out.perDayAfter < perDay * (0.5 / L)) return done("AMBER", "squeeze");
-    } else if (leftThisMonth > 0 && leftAfter < leftThisMonth * (0.2 / L)) {
-      return done("AMBER", "mostleft");
+      if (out.perDayAfter < perDay * (0.5 / L) * firm) return soft("squeeze");
+    } else if (leftThisMonth > 0 && leftAfter < leftThisMonth * (0.2 / L) * firm) {
+      return soft("mostleft");
     }
     if (projectedEnd != null && projectedEnd < Math.min(0, -((perDay || 0) * 3 * (L - 1)))) {
-      return done("AMBER", "trend");
+      return hard("trend");
     }
-    if (!hasDays && perDay != null && perDay > 0 && amount > perDay * 3 * L) {
-      return done("AMBER", "bigday");
+    if (!hasDays && perDay != null && perDay > 0 && amount > perDay * 3 * L / firm) {
+      return soft("bigday");
     }
     return done("GREEN", "ok");
   }
@@ -2993,6 +3013,28 @@ function(a,b,c){if(!Vd(b))throw Error(m(200));return Wd(null,a,b,!1,c)};Q.unmoun
       C.simpleVerdict(C.c(500), C.c(2000), C.c(1500), C.c(60), 1, { bank: C.c(1500), billsMonthly: C.c(1200), daysLeft: 20 }).reason, "float");
     eq("no float nag while the bank still covers bills",
       C.simpleVerdict(C.c(100), C.c(2000), C.c(1500), C.c(60), 1, { bank: C.c(5000), billsMonthly: C.c(1200), daysLeft: 20 }).verdict, "GREEN");
+    /* hard vs soft amber: a want is never "your call" once you're already short */
+    eq("already short => a want is RED/trend",
+      (function () { var r = C.simpleVerdict(C.c(50), C.c(100), -C.c(800), C.c(5), 0.7); return r.verdict + "/" + r.reason; })(), "RED/trend");
+    eq("already short => a need stays AMBER/trend, hard tier",
+      (function () { var r = C.simpleVerdict(C.c(50), C.c(100), -C.c(800), C.c(5), 2); return r.verdict + "/" + r.reason + "/" + r.tier; })(), "AMBER/trend/hard");
+    eq("dipping into bill money => a want is RED/reserved",
+      C.simpleVerdict(C.c(100), C.c(2000), C.c(1500), C.c(40), 0.7, { bank: C.c(500), floor: 0, reserved: C.c(450) }).verdict, "RED");
+    eq("a big-slice want is soft tier",
+      C.simpleVerdict(C.c(600), C.c(3000), C.c(2500), C.c(80), 0.7, { bank: C.c(1500), floor: 0 }).tier, "soft");
+    /* no bank: bills still due are held back before anything is safe to spend */
+    eq("manual mode holds rent back (150 on 1000 in, 800 due) => RED/pace",
+      C.simpleVerdict(C.c(150), C.c(1000), C.c(900), C.c(40), 2, { heldManual: C.c(800) }).reason, "pace");
+    eq("same buy with nothing due is fine",
+      C.simpleVerdict(C.c(150), C.c(1000), C.c(900), C.c(40), 2).verdict, "GREEN");
+    eq("heldManual is ignored once a bank balance exists",
+      C.simpleVerdict(C.c(150), C.c(1000), C.c(900), C.c(40), 2, { bank: C.c(5000), heldManual: C.c(800), daysLeft: 20 }).verdict, "GREEN");
+    /* early-month projection blends toward the typical burn */
+    eq("day-2 projection blends toward typical burn", C.projectMonthEnd(C.c(1000), C.c(300), 2, 30, C.c(900)), -C.c(800));
+    eq("past day 7 the projection is pure pace", C.projectMonthEnd(C.c(1000), C.c(300), 10, 30, C.c(900)), C.c(400));
+    /* survival stance firms up the soft warnings */
+    eq("survival stance trips squeeze sooner",
+      C.simpleVerdict(C.c(600), C.c(1000), C.c(900), C.c(40), 1, { bank: C.c(5000), daysLeft: 20, cushion: C.c(300), burn: C.c(1200), targetRunway: 3, stability: 0.15, trajectory: -1 }).reason, "squeeze");
 
     eq("Month derived from local date components", C.monthOf("2026-06-30"), "2026-06");
 
@@ -3177,7 +3219,7 @@ const TODAY = todayISO();
 document.addEventListener("visibilitychange", () => {
   if (!document.hidden && todayISO() !== TODAY) location.reload();
 });
-const BUILD_ID = "2026-07-23.40";
+const BUILD_ID = "2026-07-23.41";
 const CURRENT_MONTH = TODAY.slice(0, 7);
 
 /* ---- i18n: follows the device language by default; the core experience is
@@ -3189,7 +3231,7 @@ const STRINGS = {
   en: {
     nav_home: "Home", nav_activity: "Activity", nav_trends: "Trends", nav_settings: "Settings",
     ask_stash: "Stash", ask_or: "or", ask_spend: "spend", ask_ghost: "What's in your stash?",
-    v_stash: "Stash it.", v_spend: "Spend it.", v_yourcall: "Your call.", v_safetynet: "Use your safety net.",
+    v_stash: "Stash it.", v_spend: "Spend it.", v_yourcall: "Your call.", v_safetynet: "Use your safety net.", v_pinch: "It'll pinch.", v_need: "Only if you need it.",
     lock_title: "Enter your PIN", lock_sub: "In My Stash is locked to keep your money private.",
     lock_unlock_sub: "Enter your PIN to unlock In My Stash.", lock_forgot: "Forgot PIN?",
     lock_erase_q: "Erase all data and start fresh? This can't be undone.", lock_erase: "Erase everything",
@@ -3218,7 +3260,7 @@ const STRINGS = {
   es: {
     nav_home: "Inicio", nav_activity: "Actividad", nav_trends: "Tendencias", nav_settings: "Ajustes",
     ask_stash: "Guardar", ask_or: "o", ask_spend: "gastar", ask_ghost: "¿Qué hay en tu alcancía?",
-    v_stash: "Guárdalo.", v_spend: "Gástalo.", v_yourcall: "Tú decides.", v_safetynet: "Usa tu colchón.",
+    v_stash: "Guárdalo.", v_spend: "Gástalo.", v_yourcall: "Tú decides.", v_safetynet: "Usa tu colchón.", v_pinch: "Va a apretar.", v_need: "Solo si lo necesitas.",
     lock_title: "Ingresa tu PIN", lock_sub: "In My Stash está bloqueado para proteger tu dinero.",
     lock_unlock_sub: "Ingresa tu PIN para desbloquear In My Stash.", lock_forgot: "¿Olvidaste tu PIN?",
     lock_erase_q: "¿Borrar todos los datos y empezar de nuevo? No se puede deshacer.", lock_erase: "Borrar todo",
@@ -6201,10 +6243,10 @@ function SimpleHome(p) {
   (p.categories || []).forEach((c) => {
     if (c.class === "SAVING") savingIdSet[c.id] = 1;
   });
-  const variableSpendMTD = txns.reduce((sum, t) => C.monthOf(t.date) === month && !t.isTransfer && !t.billCovered && !String(t.id || "").startsWith("rec") && !savingIdSet[t.categoryId] ? sum + t.amount : sum, 0);
+  const variableSpendMTD = txns.reduce((sum, t) => C.monthOf(t.date) === month && !t.isTransfer && !t.billCovered && t.categoryId !== "bills" && !String(t.id || "").startsWith("rec") && !savingIdSet[t.categoryId] ? sum + t.amount : sum, 0);
   const savedMTD = txns.reduce((sum, t) => C.monthOf(t.date) === month && savingIdSet[t.categoryId] ? sum + t.amount : sum, 0);
   const outC = monthSpendC - savedMTD;
-  const projectedEnd = inProgressCalc() && dayNum >= 3 ? C.projectMonthEnd(monthNet, variableSpendMTD, dayNum, daysInMo) : null;
+  const projectedEnd = inProgressCalc() && dayNum >= 3 ? C.projectMonthEnd(monthNet, variableSpendMTD, dayNum, daysInMo, burn) : null;
   const inProgress = inProgressCalc();
   const daysLeft = inProgress ? Math.max(0, daysInMo - dayNum) : 0;
   const [amt, setAmt] = useState("");
@@ -6255,14 +6297,15 @@ function SimpleHome(p) {
   const flHorizon = freelance && inProgress && untilPay != null;
   const flDays = Math.max(1, daysRemaining);
   const flPerDay = untilPay != null ? Math.floor(untilPay / flDays) : null;
-  const projectedAtPay = payHorizon && dayNum >= 3 ? C.projectMonthEnd(untilPay, variableSpendMTD, dayNum, dayNum + daysToPay) : null;
+  const projectedAtPay = payHorizon && dayNum >= 3 ? C.projectMonthEnd(untilPay, variableSpendMTD, dayNum, dayNum + daysToPay, burn) : null;
   const vLeft = flHorizon ? untilPay : payHorizon ? untilPay : monthNet;
-  const vProjected = flHorizon ? (dayNum >= 3 ? C.projectMonthEnd(untilPay, variableSpendMTD, dayNum, daysInMo) : null) : payHorizon ? projectedAtPay : projectedEnd;
+  const vProjected = flHorizon ? (dayNum >= 3 ? C.projectMonthEnd(untilPay, variableSpendMTD, dayNum, daysInMo, burn) : null) : payHorizon ? projectedAtPay : projectedEnd;
   const vPerDay = flHorizon ? flPerDay : payHorizon ? perDayToPay : perDay;
   const v = cents != null && cents > 0 && bucket ? C.simpleVerdict(cents, vLeft, vProjected, vPerDay, leniency, {
     bank: availableNow,
     floor: settings.balanceFloor || 0,
     reserved: reservedC,
+    heldManual: availableNow == null ? reservedC : 0,
     cushion: totalCushion,
     burn,
     targetRunway: settings.targetRunway,
@@ -6282,6 +6325,7 @@ function SimpleHome(p) {
   const periodDaysN = payHorizon ? daysToPay : daysRemaining;
   // A negative figure never reads as one on a phone (the sign wraps away); say it in words.
   const shortfall = (c) => c < 0 ? money(-c) + " short" : money(c) + " left";
+  const vLeftShown = availableNow == null ? vLeft - reservedC : vLeft;
   const copy = v && {
     bank: {
       ic: "\u2715",
@@ -6301,19 +6345,19 @@ function SimpleHome(p) {
       sub: "An emergency is what it's for \u2014 you'd have " + money(v.netAfter || 0) + " of cover left" + (v.runwayAfter != null && v.runwayAfter !== Infinity ? " (\u2248 " + v.runwayAfter.toFixed(1) + " mo)" : "") + "."
     },
     dent: {
-      ic: "\u25b3",
-      head: tr("v_yourcall"),
+      ic: "\u25B3",
+      head: tr("v_pinch"),
       sub: "It fits your budget, but it drops your safety net below your " + settings.targetRunway + "-month goal."
     },
     squeeze: {
       ic: "\u25B3",
-      head: tr("v_yourcall"),
+      head: tr("v_pinch"),
       sub: "That leaves about " + money(v.perDayAfter || 0) + "/day for the " + periodDaysN + " days " + (payHorizon ? "until payday" : "left in " + monthLabel(month)) + "."
     },
     left: {
       ic: "\u2715",
       head: tr("v_stash"),
-      sub: "That's more than you have left \u2014 you'd be " + money(-v.leftAfter) + " past " + (payHorizon ? "your buffer until payday" : flHorizon ? "what's in the bank this month" : "what came in this month") + "."
+      sub: "That's more than you have left \u2014 you'd be " + money(-v.leftAfter) + " past " + (payHorizon ? "your buffer until payday" : flHorizon ? "what's in the bank this month" : v.heldManual > 0 ? "what's left after bills held" : "what came in this month") + "."
     },
     pace: {
       ic: "\u2715",
@@ -6324,37 +6368,47 @@ function SimpleHome(p) {
     },
     mostleft: {
       ic: "\u25B3",
-      head: tr("v_yourcall"),
+      head: tr("v_pinch"),
       sub: "It's most of what's left \u2014 only " + money(v.leftAfter) + " would remain " + (payHorizon ? "until payday" : "for the rest of " + monthLabel(month)) + "."
     },
     trend: {
-      ic: "\u25B3",
-      head: tr("v_yourcall"),
+      ic: v.verdict === "RED" ? "\u2715" : "\u25B3",
+      head: v.verdict === "RED" ? tr("v_stash") : tr("v_need"),
       sub: payHorizon
         ? "You're already on pace to be " + shortfall(projectedAtPay == null ? 0 : projectedAtPay) + " at payday \u2014 before this."
         : monthLabel(month) + " is already on pace to end " + shortfall(projectedEnd == null ? 0 : projectedEnd) + " \u2014 before this."
     },
     bigday: {
       ic: "\u25B3",
-      head: tr("v_yourcall"),
+      head: tr("v_pinch"),
       sub: "That's " + (vPerDay ? Math.round(cents / vPerDay) : 0) + " days of budget in one go \u2014 about " + money(vPerDay || 0) + "/day is left " + periodTail + "."
     },
     want: {
-      ic: "\u25b3",
-      head: tr("v_yourcall"),
+      ic: "\u25B3",
+      head: tr("v_pinch"),
       sub: "That's a big bite of your cash for a want \u2014 you'd have " + money(v.bankAfter || 0) + " left in the bank."
     },
+    float: {
+      ic: v.verdict === "RED" ? "\u2715" : "\u25B3",
+      head: v.verdict === "RED" ? tr("v_stash") : tr("v_need"),
+      sub: "That would leave " + money(v.bankAfter || 0) + " in the bank \u2014 under what next month's bills need."
+    },
     reserved: {
-      ic: "\u25b3",
-      head: tr("v_yourcall"),
+      ic: v.verdict === "RED" ? "\u2715" : "\u25B3",
+      head: v.verdict === "RED" ? tr("v_stash") : tr("v_need"),
       sub: "This dips into the " + money(v.reservedAfter || 0) + " set aside for bills still due this month \u2014 you'd have " + money(v.bankAfter || 0) + " in the bank."
     },
     ok: {
       ic: "\u2713",
       head: tr("v_spend"),
-      sub: (leniency > 1 && cents > (vPerDay || 0) * 3 ? "Essentials get some slack \u2014 you'd have " + money(v.leftAfter) + " left " + periodTail + "." : "You'd still have " + money(v.leftAfter) + " left " + periodTail + ".") + (leniency <= 1 && (settings.savingsGoal || 0) > 0 && savedTotal < settings.savingsGoal ? " Or stash it \u2014 " + money(cents) + " closer to your " + fmt0(settings.savingsGoal) + " goal." : "")
+      sub: (leniency > 1 && cents > (vPerDay || 0) * 3 ? "Essentials get some slack \u2014 you'd have " + money(v.leftAfter) + " left " + periodTail + "." : "You'd still have " + money(v.leftAfter) + " left " + periodTail + ".") + (leniency <= 1 && (settings.savingsGoal || 0) > 0 && savedTotal < settings.savingsGoal ? " Or stash it \u2014 " + money(cents) + " closer to your " + fmt0(settings.savingsGoal) + " goal." : "") + (v.heldManual > 0 ? " That's after " + money(v.heldManual) + " held for bills." : "")
     }
   }[v.reason];
+  // Survival stance: say plainly why the answer is firmer than the month math.
+  if (copy && v.stance === "survival") {
+    if (v.tier === "hard" && v.verdict === "AMBER") copy.sub += " Your safety net is thin right now \u2014 plan for it.";
+    else if (v.tier === "soft") copy.sub += " Money's tight this stretch.";
+  }
   // Close the loop: the verdict becomes an action. GREEN logs the purchase,
   // RED stashes the amount toward the goal instead, AMBER offers both — every
   // answer leaves a mark instead of evaporating.
@@ -6440,7 +6494,7 @@ function SimpleHome(p) {
     },
     /* @__PURE__ */ React.createElement("span", { className: "b-ic" }, b.icon),
     b.label
-  ))), cents != null && cents > 0 && !bucket && /* @__PURE__ */ React.createElement("div", { className: "hint", style: { textAlign: "center", marginTop: 8 } }, "Pick the category that fits — essentials get more slack, fun gets less."), reservedC > 0 && !v && /* @__PURE__ */ React.createElement("div", { className: "hint", style: { textAlign: "center", marginTop: 8 } }, money(reservedC), " held back for bills due later this month."), v && monthNet > 0 && cents > 0 && /* @__PURE__ */ React.createElement("div", { className: "impact" }, /* @__PURE__ */ React.createElement("div", { className: "meter " + (v.verdict === "RED" ? "crit-track" : v.verdict === "AMBER" ? "warn-track" : "") }, /* @__PURE__ */ React.createElement("i", { style: { transform: "scaleX(" + Math.max(0, Math.min(1, v.leftAfter / monthNet)).toFixed(4) + ")" } })), /* @__PURE__ */ React.createElement("div", { className: "impact-cap" }, v.leftAfter >= 0 ? "of " + money(vLeft) + " " + periodTail : money(-v.leftAfter) + " over " + periodTail)), v && (v.verdict !== "RED" || bucket === "emergency" || bucket === "bills") && /* @__PURE__ */ React.createElement("div", { className: "verdict-stage", key: "stage-" + v.verdict + "-" + v.reason }, v.verdict === "RED" ? /* @__PURE__ */ React.createElement(StashAnim, null) : v.verdict === "GREEN" ? /* @__PURE__ */ React.createElement(SwipeAnim, null) : /* @__PURE__ */ React.createElement(CoinAnim, null)), v && /* @__PURE__ */ React.createElement("div", { key: "vd-" + v.verdict, className: "verdict " + v.verdict.toLowerCase(), role: "status" }, /* @__PURE__ */ React.createElement("span", { className: "v-ic" }, copy.ic), /* @__PURE__ */ React.createElement("span", null, /* @__PURE__ */ React.createElement("b", null, copy.head), /* @__PURE__ */ React.createElement("span", { className: "v-sub" }, copy.sub))), v && availableNow == null && /* @__PURE__ */ React.createElement("div", { className: "hint", style: { textAlign: "center", marginTop: 8 } }, "Based on what you\u2019ve logged this month. ", /* @__PURE__ */ React.createElement("button", { className: "linklike", onClick: () => goSet("banks") }, "Connect a bank"), " for an answer from your real balance."), v && /* @__PURE__ */ React.createElement("div", { className: "btn-row", style: { justifyContent: "center", marginTop: 10 } },
+  ))), cents != null && cents > 0 && !bucket && /* @__PURE__ */ React.createElement("div", { className: "hint", style: { textAlign: "center", marginTop: 8 } }, "Pick the category that fits — essentials get more slack, fun gets less."), reservedC > 0 && !v && /* @__PURE__ */ React.createElement("div", { className: "hint", style: { textAlign: "center", marginTop: 8 } }, money(reservedC), " held back for bills due later this month."), v && monthNet > 0 && cents > 0 && /* @__PURE__ */ React.createElement("div", { className: "impact" }, /* @__PURE__ */ React.createElement("div", { className: "meter " + (v.verdict === "RED" ? "crit-track" : v.verdict === "AMBER" ? "warn-track" : "") }, /* @__PURE__ */ React.createElement("i", { style: { transform: "scaleX(" + Math.max(0, Math.min(1, v.leftAfter / monthNet)).toFixed(4) + ")" } })), /* @__PURE__ */ React.createElement("div", { className: "impact-cap" }, v.leftAfter >= 0 ? "of " + money(vLeftShown) + " " + periodTail : money(-v.leftAfter) + " over " + periodTail)), v && (v.verdict !== "RED" || bucket === "emergency" || bucket === "bills") && /* @__PURE__ */ React.createElement("div", { className: "verdict-stage", key: "stage-" + v.verdict + "-" + v.reason }, v.verdict === "RED" ? /* @__PURE__ */ React.createElement(StashAnim, null) : v.verdict === "GREEN" ? /* @__PURE__ */ React.createElement(SwipeAnim, null) : /* @__PURE__ */ React.createElement(CoinAnim, null)), v && /* @__PURE__ */ React.createElement("div", { key: "vd-" + v.verdict, className: "verdict " + v.verdict.toLowerCase(), role: "status" }, /* @__PURE__ */ React.createElement("span", { className: "v-ic" }, copy.ic), /* @__PURE__ */ React.createElement("span", null, /* @__PURE__ */ React.createElement("b", null, copy.head), /* @__PURE__ */ React.createElement("span", { className: "v-sub" }, copy.sub))), v && availableNow == null && /* @__PURE__ */ React.createElement("div", { className: "hint", style: { textAlign: "center", marginTop: 8 } }, "Based on what you\u2019ve logged this month. ", /* @__PURE__ */ React.createElement("button", { className: "linklike", onClick: () => goSet("banks") }, "Connect a bank"), " for an answer from your real balance."), v && /* @__PURE__ */ React.createElement("div", { className: "btn-row", style: { justifyContent: "center", marginTop: 10 } },
     (v.verdict === "GREEN" || v.verdict === "AMBER") && /* @__PURE__ */ React.createElement("button", { className: "btn primary", onClick: logAsk }, "Log it"),
     (v.verdict === "RED" || v.verdict === "AMBER") && /* @__PURE__ */ React.createElement("button", { className: "btn " + (v.verdict === "RED" ? "primary" : "quiet"), onClick: stashAsk }, "Stash it instead")), false), false && /* @__PURE__ */ React.createElement("div", { className: "tilerow jar-center" }, /* @__PURE__ */ React.createElement("div", { className: "minitile" }, /* @__PURE__ */ React.createElement("div", { className: "mt-label" }, "Saved up"), /* @__PURE__ */ React.createElement(AnimatedFmt0, { className: "mt-val", cents: savedTotal })), /* @__PURE__ */ React.createElement(Jar, { level: savingsLevel, size: 46, tid: "saved" }), /* @__PURE__ */ React.createElement("div", { className: "minitile" }, /* @__PURE__ */ React.createElement("div", { className: "mt-label" }, "Safety net"), /* @__PURE__ */ React.createElement("div", { className: "mt-val" }, runway === Infinity ? "\u2014" : runway.toFixed(1) + "mo"))), dataMonths.length > 1 ? null : false ? /* @__PURE__ */ React.createElement("section", { className: "card center" }, /* @__PURE__ */ React.createElement("div", { className: "empty" }, /* @__PURE__ */ React.createElement("span", { className: "e-ic" }, "\u{1F4B5}"), "Tap ", /* @__PURE__ */ React.createElement("b", null, "+"), " and log your first deposit.")) : null, checklistCard);
 }
