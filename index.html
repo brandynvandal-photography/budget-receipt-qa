@@ -221,10 +221,6 @@ h2.screen-title{font-size:22px;font-weight:700;margin:14px 0 2px}
   background:var(--warn);border:2px solid var(--surface)}
 
 /* friendly stat chips (Activity "In the bank") + the per-day pill on Home */
-.pp-perday,.pp-days-chip{display:inline-flex;align-items:center;border-radius:999px;padding:5px 13px;
-  font-weight:800;font-size:14px;letter-spacing:-.01em;line-height:1.2}
-.pp-perday{background:color-mix(in srgb, var(--accent) 14%, transparent);
-  border:1px solid color-mix(in srgb, var(--accent) 32%, transparent);color:var(--accent)}
 .bub-chips{display:flex;flex-wrap:wrap;gap:6px;justify-content:center;margin-top:8px}
 .chip{background:color-mix(in srgb, var(--ink) 7%, transparent);border:1px solid var(--ring);
   border-radius:999px;padding:3.5px 11px;font-size:12px;font-weight:700;color:var(--ink2)}
@@ -500,7 +496,12 @@ body{background:linear-gradient(180deg,#16413a 0px,#10302b 300px,#0a1614 680px) 
 .verdict{transition:background-color .3s ease,color .3s ease;animation:verdict-in .32s cubic-bezier(.22,.61,.36,1)}
 @keyframes verdict-in{from{opacity:0;transform:translateY(6px) scale(.98)}to{opacity:1;transform:none}}
 .impact{margin-top:12px}
-.impact .impact-cap{font-size:12.5px;color:var(--muted);margin-top:6px;text-align:center}
+/* the receipt under an answer: three tiles, same slots every time */
+.tilerow.receipt{grid-template-columns:1fr 1fr 1fr;gap:6px;margin:10px 0 0}
+.tilerow.receipt .minitile{padding:10px 6px;border-radius:12px}
+.tilerow.receipt .mt-label{font-size:11.5px}
+.tilerow.receipt .mt-val{font-size:16px;margin-top:2px}
+.tilerow.receipt .mt-note{font-size:11px;color:var(--muted);margin-top:3px;line-height:1.3}
 .quickrow{display:flex;gap:7px;justify-content:center;flex-wrap:wrap;margin:10px 0 2px}
 .quickamt{border:1px solid var(--grid);background:transparent;color:var(--ink2);border-radius:999px;
   padding:6px 14px;font-size:13.5px;font-weight:600;cursor:pointer;transition:transform .12s ease}
@@ -648,10 +649,6 @@ body{background:linear-gradient(180deg,#16413a 0px,#10302b 300px,#0a1614 680px) 
 .paypocket{display:flex;flex-direction:column;align-items:center;text-align:center;gap:2px}
 .paypocket .pp-val{font-size:30px;font-weight:800;letter-spacing:-.02em;color:var(--ink);line-height:1.1}
 .paypocket .pp-cap{font-size:13px;color:var(--ink2);margin-top:3px}
-.pp-row{display:flex;flex-wrap:wrap;gap:8px;justify-content:center;margin-top:9px}
-.pp-days-chip{background:color-mix(in srgb, var(--ink) 7%, transparent);border:1px solid var(--ring);
-  color:var(--ink2)}
-.pp-days-chip b{color:var(--accent);margin-right:5px;font-weight:800}
 .til-day{color:var(--muted)}
 .ask-help{font-size:13px;color:var(--ink2);text-align:left;background:rgba(255,255,255,.04);
   border:1px solid var(--grid);border-radius:12px;padding:10px 12px;margin:10px 0 2px;line-height:1.5}
@@ -1514,18 +1511,24 @@ function(a,b,c){if(!Vd(b))throw Error(m(200));return Wd(null,a,b,!1,c)};Q.unmoun
   /* ---------- month-end projection (variable spending paced) ----------
      Auto entries (income/bills/savings) land in full on the 1st, so only
      VARIABLE spending gets paced across the month (§8: no scare numbers). */
-  function projectMonthEnd(netNow, variableSpendMTD, daysElapsed, daysInMo, typicalMonthly) {
-    if (daysElapsed <= 0) return netNow;
-    var daysLeft = Math.max(0, daysInMo - daysElapsed);
+  // The daily variable-spend rate the projection runs on — and the "you're
+  // spending about $X/day" the answer quotes, so the two never disagree.
+  // The first days of a month are a thin sample — one big buy on the 2nd
+  // projects a catastrophe. Blend toward the typical daily burn until a
+  // week of data exists.
+  function paceRate(variableSpendMTD, daysElapsed, typicalMonthly) {
+    if (daysElapsed <= 0) return null;
     var daily = variableSpendMTD / daysElapsed;
-    // The first days of a month are a thin sample — one big buy on the 2nd
-    // projects a catastrophe. Blend toward the typical daily burn until a
-    // week of data exists.
     if (typicalMonthly > 0 && daysElapsed < 7) {
       var w = daysElapsed / 7;
       daily = w * daily + (1 - w) * (typicalMonthly / 30);
     }
-    return Math.round(netNow - daily * daysLeft);
+    return daily;
+  }
+  function projectMonthEnd(netNow, variableSpendMTD, daysElapsed, daysInMo, typicalMonthly) {
+    if (daysElapsed <= 0) return netNow;
+    var daysLeft = Math.max(0, daysInMo - daysElapsed);
+    return Math.round(netNow - paceRate(variableSpendMTD, daysElapsed, typicalMonthly) * daysLeft);
   }
 
   /* ---------- simple-mode verdict: this month + pace + per-day ----------
@@ -1663,6 +1666,20 @@ function(a,b,c){if(!Vd(b))throw Error(m(200));return Wd(null,a,b,!1,c)};Q.unmoun
     return done("GREEN", "ok");
   }
 
+  // The largest amount that still gets a GREEN answer in this state. Every
+  // check in simpleVerdict only gets stricter as the amount grows, so a
+  // binary search over the verdict itself finds the line; 0 when even a
+  // cent isn't green (already short, or the money is spoken for).
+  function maxGreen(leftThisMonth, projectedEnd, perDay, leniency, ctx, hi) {
+    var green = function (a) { return simpleVerdict(a, leftThisMonth, projectedEnd, perDay, leniency, ctx).verdict === "GREEN"; };
+    var top = hi > 0 ? Math.floor(hi) : 0;
+    if (top < 1 || !green(1)) return 0;
+    if (green(top)) return top;
+    var lo = 1, h = top; // green(lo) holds, green(h) doesn't
+    while (h - lo > 1) { var mid = Math.floor((lo + h) / 2); if (green(mid)) lo = mid; else h = mid; }
+    return lo;
+  }
+
   // spending buckets shown in the "Stash or spend?" picker, with how lenient
   // each is. Essentials you can't easily skip get more slack.
   var SPEND_BUCKETS = [
@@ -1705,7 +1722,7 @@ function(a,b,c){if(!Vd(b))throw Error(m(200));return Wd(null,a,b,!1,c)};Q.unmoun
     splitPool: splitPool, allocate: allocate,
     monthlySetAside: monthlySetAside, monthsUntilFunded: monthsUntilFunded,
     monthsBetween: monthsBetween, fundStatus: fundStatus, parseDollars: parseDollars,
-    canAfford: canAfford, simpleVerdict: simpleVerdict, projectMonthEnd: projectMonthEnd, minIncomeNeeded: minIncomeNeeded,
+    canAfford: canAfford, simpleVerdict: simpleVerdict, projectMonthEnd: projectMonthEnd, paceRate: paceRate, maxGreen: maxGreen, minIncomeNeeded: minIncomeNeeded,
     SPEND_BUCKETS: SPEND_BUCKETS, bucketLeniency: bucketLeniency,
   };
 
@@ -3047,6 +3064,17 @@ function(a,b,c){if(!Vd(b))throw Error(m(200));return Wd(null,a,b,!1,c)};Q.unmoun
     /* survival stance firms up the soft warnings */
     eq("survival stance trips squeeze sooner",
       C.simpleVerdict(C.c(600), C.c(1000), C.c(900), C.c(40), 1, { bank: C.c(5000), daysLeft: 20, cushion: C.c(300), burn: C.c(1200), targetRunway: 3, stability: 0.15, trajectory: -1 }).reason, "squeeze");
+    /* receipt: "fine up to" is the largest still-green amount, read off the verdict itself */
+    (function () {
+      var ctx = { bank: C.c(5000), floor: 0, daysLeft: 20 };
+      var g = C.maxGreen(C.c(1000), C.c(900), C.c(40), 1, ctx, C.c(1000));
+      eq("maxGreen lands on the squeeze line", g, C.c(600));
+      ok("maxGreen is green", C.simpleVerdict(g, C.c(1000), C.c(900), C.c(40), 1, ctx).verdict === "GREEN", "got " + g);
+      ok("one cent more is not green", C.simpleVerdict(g + 1, C.c(1000), C.c(900), C.c(40), 1, ctx).verdict !== "GREEN", "got " + g);
+    })();
+    eq("maxGreen is 0 when already short (trend)", C.maxGreen(C.c(100), -C.c(800), C.c(5), 0.7, { daysLeft: 22 }, C.c(100)), 0);
+    ok("maxGreen never exceeds what's left", C.maxGreen(C.c(300), C.c(300), C.c(100), 3, { daysLeft: 3 }, C.c(900)) <= C.c(300));
+    eq("paceRate is the projection's own rate", Math.round(C.c(1000) - C.paceRate(C.c(300), 2, C.c(900)) * 28), C.projectMonthEnd(C.c(1000), C.c(300), 2, 30, C.c(900)));
 
     eq("Month derived from local date components", C.monthOf("2026-06-30"), "2026-06");
 
@@ -3231,7 +3259,7 @@ const TODAY = todayISO();
 document.addEventListener("visibilitychange", () => {
   if (!document.hidden && todayISO() !== TODAY) location.reload();
 });
-const BUILD_ID = "2026-07-23.44";
+const BUILD_ID = "2026-07-23.45";
 const CURRENT_MONTH = TODAY.slice(0, 7);
 
 /* ---- i18n: follows the device language by default; the core experience is
@@ -3243,7 +3271,7 @@ const STRINGS = {
   en: {
     nav_home: "Home", nav_activity: "Activity", nav_trends: "Trends", nav_settings: "Settings",
     ask_stash: "Stash", ask_or: "or", ask_spend: "spend", ask_ghost: "What's in your stash?",
-    v_stash: "Stash it.", v_spend: "Spend it.", v_yourcall: "Your call.", v_safetynet: "Use your safety net.", v_pinch: "It'll pinch.", v_need: "Only if you need it.",
+    v_stash: "Stash it.", v_spend: "Spend it.", v_yourcall: "Your call.", v_safetynet: "Use your safety net.", v_pinch: "It'll pinch.", v_need: "Only if you need it.", r_after: "After this", r_perday: "Per day", r_fine: "Fine up to",
     lock_title: "Enter your PIN", lock_sub: "In My Stash is locked to keep your money private.",
     lock_unlock_sub: "Enter your PIN to unlock In My Stash.", lock_forgot: "Forgot PIN?",
     lock_erase_q: "Erase all data and start fresh? This can't be undone.", lock_erase: "Erase everything",
@@ -3272,7 +3300,7 @@ const STRINGS = {
   es: {
     nav_home: "Inicio", nav_activity: "Actividad", nav_trends: "Tendencias", nav_settings: "Ajustes",
     ask_stash: "Guardar", ask_or: "o", ask_spend: "gastar", ask_ghost: "¿Qué hay en tu alcancía?",
-    v_stash: "Guárdalo.", v_spend: "Gástalo.", v_yourcall: "Tú decides.", v_safetynet: "Usa tu colchón.", v_pinch: "Va a apretar.", v_need: "Solo si lo necesitas.",
+    v_stash: "Guárdalo.", v_spend: "Gástalo.", v_yourcall: "Tú decides.", v_safetynet: "Usa tu colchón.", v_pinch: "Va a apretar.", v_need: "Solo si lo necesitas.", r_after: "Después", r_perday: "Por día", r_fine: "Seguro hasta",
     lock_title: "Ingresa tu PIN", lock_sub: "In My Stash está bloqueado para proteger tu dinero.",
     lock_unlock_sub: "Ingresa tu PIN para desbloquear In My Stash.", lock_forgot: "¿Olvidaste tu PIN?",
     lock_erase_q: "¿Borrar todos los datos y empezar de nuevo? No se puede deshacer.", lock_erase: "Borrar todo",
@@ -4517,7 +4545,7 @@ function Onboarding({ settings, setSetting, setTab }) {
             /* @__PURE__ */ React.createElement("button", { type: "button", className: iMode === "hourly" ? "on" : "", "aria-pressed": iMode === "hourly", onClick: () => setIMode("hourly") }, "Hourly"),
             /* @__PURE__ */ React.createElement("button", { type: "button", className: iMode === "freelance" ? "on" : "", "aria-pressed": iMode === "freelance", onClick: () => setIMode("freelance") }, "Freelance"))),
         /* @__PURE__ */ React.createElement("div", { className: "ob-field" }, /* @__PURE__ */ React.createElement("label", null, "Never let my bank drop below", /* @__PURE__ */ React.createElement("span", { className: "f-sub" }, "We'll warn you before a buy crosses it.")), /* @__PURE__ */ React.createElement("input", { type: "number", inputMode: "decimal", placeholder: "$  e.g. 200", value: floor, onChange: (e) => setFloor(e.target.value) })),
-        iMode !== "freelance" && /* @__PURE__ */ React.createElement("div", { className: "ob-field" }, /* @__PURE__ */ React.createElement("label", null, "Next payday", /* @__PURE__ */ React.createElement("span", { className: "f-sub" }, "Powers “days until payday” on Home.")), /* @__PURE__ */ React.createElement("input", { type: "date", className: payDate ? void 0 : "date-empty", placeholder: "Pick a date", value: payDate, onChange: (e) => setPayDate(e.target.value) }), /* @__PURE__ */ React.createElement("select", { value: sched, onChange: (e) => setSched(e.target.value), style: { marginTop: 8 } }, /* @__PURE__ */ React.createElement("option", { value: "weekly" }, "Weekly"), /* @__PURE__ */ React.createElement("option", { value: "biweekly" }, "Every 2 weeks"), /* @__PURE__ */ React.createElement("option", { value: "semimonthly" }, "Twice a month"), /* @__PURE__ */ React.createElement("option", { value: "monthly" }, "Monthly"))),
+        iMode !== "freelance" && /* @__PURE__ */ React.createElement("div", { className: "ob-field" }, /* @__PURE__ */ React.createElement("label", null, "Next payday", /* @__PURE__ */ React.createElement("span", { className: "f-sub" }, "Paces every answer to your next check.")), /* @__PURE__ */ React.createElement("input", { type: "date", className: payDate ? void 0 : "date-empty", placeholder: "Pick a date", value: payDate, onChange: (e) => setPayDate(e.target.value) }), /* @__PURE__ */ React.createElement("select", { value: sched, onChange: (e) => setSched(e.target.value), style: { marginTop: 8 } }, /* @__PURE__ */ React.createElement("option", { value: "weekly" }, "Weekly"), /* @__PURE__ */ React.createElement("option", { value: "biweekly" }, "Every 2 weeks"), /* @__PURE__ */ React.createElement("option", { value: "semimonthly" }, "Twice a month"), /* @__PURE__ */ React.createElement("option", { value: "monthly" }, "Monthly"))),
         iMode === "hourly" && /* @__PURE__ */ React.createElement("div", { className: "ob-field" }, /* @__PURE__ */ React.createElement("label", null, "Hourly rate × hours", /* @__PURE__ */ React.createElement("span", { className: "f-sub" }, "Optional — estimates your typical check.")),
           /* @__PURE__ */ React.createElement("div", { style: { display: "flex", gap: 8 } },
             /* @__PURE__ */ React.createElement("input", { type: "number", inputMode: "decimal", placeholder: "$/hr", value: hrRate, onChange: (e) => setHrRate(e.target.value), style: { flex: 1 } }),
@@ -6313,7 +6341,7 @@ function SimpleHome(p) {
   const vLeft = flHorizon ? untilPay : payHorizon ? untilPay : monthNet;
   const vProjected = flHorizon ? (dayNum >= 3 ? C.projectMonthEnd(untilPay, variableSpendMTD, dayNum, daysInMo, burn) : null) : payHorizon ? projectedAtPay : projectedEnd;
   const vPerDay = flHorizon ? flPerDay : payHorizon ? perDayToPay : perDay;
-  const v = cents != null && cents > 0 && bucket ? C.simpleVerdict(cents, vLeft, vProjected, vPerDay, leniency, {
+  const vCtx = {
     bank: availableNow,
     floor: settings.balanceFloor || 0,
     reserved: reservedC,
@@ -6324,7 +6352,8 @@ function SimpleHome(p) {
     stability: incStability,
     trajectory,
     daysLeft: payHorizon ? daysToPay : (inProgress ? daysRemaining : null)
-  }) : null;
+  };
+  const v = cents != null && cents > 0 && bucket ? C.simpleVerdict(cents, vLeft, vProjected, vPerDay, leniency, vCtx) : null;
   const prevVerdict = useRef(null);
   useEffect(() => {
     const cur = v ? v.verdict : null;
@@ -6337,7 +6366,13 @@ function SimpleHome(p) {
   const periodDaysN = payHorizon ? daysToPay : daysRemaining;
   // A negative figure never reads as one on a phone (the sign wraps away); say it in words.
   const shortfall = (c) => c < 0 ? money(-c) + " short" : money(c) + " left";
+  // Rates and thresholds read as whole dollars, floored so they never overstate.
+  const wholeDollars = (c) => fmt0(Math.floor(Math.max(0, c || 0) / 100) * 100);
   const vLeftShown = availableNow == null ? vLeft - reservedC : vLeft;
+  // Two rates make the pace actionable: what you're spending per day now
+  // (the projection's own rate) and what's left per day for the stretch.
+  const paceNow = dayNum >= 3 ? C.paceRate(variableSpendMTD, dayNum, burn) : null;
+  const perDayLeft = periodDaysN > 0 && vLeftShown != null ? Math.floor(Math.max(0, vLeftShown) / periodDaysN) : vPerDay;
   const copy = v && {
     bank: {
       ic: "\u2715",
@@ -6364,7 +6399,7 @@ function SimpleHome(p) {
     squeeze: {
       ic: "\u25B3",
       head: tr("v_pinch"),
-      sub: "That leaves about " + money(v.perDayAfter || 0) + "/day for the " + periodDaysN + " days " + (payHorizon ? "until payday" : "left in " + monthLabel(month)) + "."
+      sub: "It fits, but it cuts what you can spend each day from " + wholeDollars(perDayLeft) + " to " + wholeDollars(v.perDayAfter) + " for the " + periodDaysN + " days " + (payHorizon ? "until payday" : "left in " + monthLabel(month)) + "."
     },
     left: {
       ic: "\u2715",
@@ -6374,9 +6409,10 @@ function SimpleHome(p) {
     pace: {
       ic: "\u2715",
       head: tr("v_stash"),
-      sub: payHorizon
-        ? "It would tip you into the red \u2014 at your pace you'd be " + shortfall(v.projAfter) + " at payday."
-        : "It would tip the month into the red \u2014 at your pace you'd end " + monthLabel(month) + " " + shortfall(v.projAfter) + "."
+      sub: (payHorizon ? "It would tip you into the red: " : "It would tip the month into the red: ")
+        + (paceNow != null ? "at about " + fmt0(paceNow) + "/day" : "at your pace")
+        + (payHorizon ? " you'd be " + shortfall(v.projAfter) + " at payday." : " you'd end " + monthLabel(month) + " " + shortfall(v.projAfter) + ".")
+        + (perDayLeft != null ? " Skip it and " + wholeDollars(perDayLeft) + "/day keeps you even." : "")
     },
     mostleft: {
       ic: "\u25B3",
@@ -6386,14 +6422,13 @@ function SimpleHome(p) {
     trend: {
       ic: v.verdict === "RED" ? "\u2715" : "\u25B3",
       head: v.verdict === "RED" ? tr("v_stash") : tr("v_need"),
-      sub: payHorizon
-        ? "You're already on pace to be " + shortfall(projectedAtPay == null ? 0 : projectedAtPay) + " at payday \u2014 before this."
-        : monthLabel(month) + " is already on pace to end " + shortfall(projectedEnd == null ? 0 : projectedEnd) + " \u2014 before this."
+      sub: (paceNow != null ? "You're spending about " + fmt0(paceNow) + "/day. " + wholeDollars(perDayLeft) + "/day is what's left " + periodTail + ", so even" : "Even")
+        + " without this you'd " + (payHorizon ? "be " + shortfall(vProjected == null ? 0 : vProjected) + " at payday." : "end " + monthLabel(month) + " " + shortfall(vProjected == null ? 0 : vProjected) + ".")
     },
     bigday: {
       ic: "\u25B3",
       head: tr("v_pinch"),
-      sub: "That's " + (vPerDay ? Math.round(cents / vPerDay) : 0) + " days of budget in one go \u2014 about " + money(vPerDay || 0) + "/day is left " + periodTail + "."
+      sub: "That's " + (perDayLeft ? Math.round(cents / perDayLeft) : 0) + " days of budget in one go \u2014 about " + wholeDollars(perDayLeft) + "/day is left " + periodTail + "."
     },
     want: {
       ic: "\u25B3",
@@ -6421,6 +6456,25 @@ function SimpleHome(p) {
     if (v.tier === "hard" && v.verdict === "AMBER") copy.sub += " Your safety net is thin right now \u2014 plan for it.";
     else if (v.tier === "soft") copy.sub += " Money's tight this stretch.";
   }
+  // The receipt under every answer: the same three numbers each time, so the
+  // answer turns into a plan — what's left after this, the pace to hold for
+  // the days that remain (days-to-payday lives here now, not on the top
+  // card), and the amount that would still get a green answer.
+  const rcDays = periodDaysN > 0 ? periodDaysN : null;
+  const rcPerDayAfter = v && rcDays ? Math.max(0, Math.floor(v.leftAfter / rcDays)) : null;
+  const rcFine = v ? C.maxGreen(vLeft, vProjected, vPerDay, leniency, vCtx, Math.max(cents, vLeft, 0)) : null;
+  const rcBucketFor = { emergency: "for an emergency", food: "for food", gas: "for gas", bills: "for bills", general: "for general buys", fun: "for fun" }[bucket] || "";
+  const rcPayAmt = (settings.paycheck || {}).amount || 0;
+  const rcDaysNote = payHorizon
+    ? daysToPay + (daysToPay === 1 ? " day to payday" : " days to payday")
+    : rcDays != null ? rcDays + (rcDays === 1 ? " day left in " : " days left in ") + monthLabel(month) : periodTail;
+  const rcFineNote = rcFine > 0 ? rcBucketFor
+    : payHorizon && rcPayAmt > 0 ? fmt0(rcPayAmt) + " lands in " + daysToPay + (daysToPay === 1 ? " day" : " days")
+    : payHorizon ? "until payday" : "this month";
+  const receipt = v && /* @__PURE__ */ React.createElement("div", { className: "tilerow receipt", "aria-label": "What this does" },
+    /* @__PURE__ */ React.createElement("div", { className: "minitile" }, /* @__PURE__ */ React.createElement("div", { className: "mt-label" }, tr("r_after")), /* @__PURE__ */ React.createElement("div", { className: "mt-val" }, v.leftAfter < 0 ? fmt0(-v.leftAfter) + " short" : wholeDollars(v.leftAfter)), /* @__PURE__ */ React.createElement("div", { className: "mt-note" }, v.leftAfter < 0 ? "past what's left" : "of " + wholeDollars(vLeftShown))),
+    /* @__PURE__ */ React.createElement("div", { className: "minitile" }, /* @__PURE__ */ React.createElement("div", { className: "mt-label" }, tr("r_perday")), /* @__PURE__ */ React.createElement("div", { className: "mt-val" }, rcPerDayAfter != null ? wholeDollars(rcPerDayAfter) : "\u2014"), /* @__PURE__ */ React.createElement("div", { className: "mt-note" }, rcDaysNote)),
+    /* @__PURE__ */ React.createElement("div", { className: "minitile" }, /* @__PURE__ */ React.createElement("div", { className: "mt-label" }, tr("r_fine")), /* @__PURE__ */ React.createElement("div", { className: "mt-val" }, wholeDollars(rcFine)), /* @__PURE__ */ React.createElement("div", { className: "mt-note" }, rcFineNote)));
   // Close the loop: the verdict becomes an action. GREEN logs the purchase,
   // RED stashes the amount toward the goal instead, AMBER offers both — every
   // answer leaves a mark instead of evaporating.
@@ -6448,7 +6502,7 @@ function SimpleHome(p) {
   // hides on every device).
   const ckItems = [];
   if (!(settings.bankLinks || []).length && availableNow == null && !(monthIncomeC > 0)) ckItems.push({ k: "in", t: "Log your income, or connect a bank", s: "Tap + to log a deposit, or connect a bank so it tracks itself.", go: () => goSet("banks") });
-  if ((settings.incomeMode || "paycheck") !== "freelance" && !((settings.paycheck || {}).payDate)) ckItems.push({ k: "pay", t: "Set your payday", s: "Turns on “days until payday” and the per-day pace.", go: () => goSet("plan") });
+  if ((settings.incomeMode || "paycheck") !== "freelance" && !((settings.paycheck || {}).payDate)) ckItems.push({ k: "pay", t: "Set your payday", s: "Paces every answer to your next check.", go: () => goSet("plan") });
   if (!(settings.commitments || []).length) ckItems.push({ k: "bills", t: "Add your bills", s: "Rent and the must-pays get held back before anything is called safe to spend.", go: () => goSet("bills") });
   if (!(settings.lock && settings.lock.enabled)) ckItems.push({ k: "lock", t: "Turn on a PIN", s: "Keeps balances private if someone picks up your phone.", go: () => goSet("privacy") });
   const checklistCard = !settings.checklistHidden && ckItems.length ? /* @__PURE__ */ React.createElement("section", { className: "card", "aria-label": "Next steps" }, ckItems.map((it) => /* @__PURE__ */ React.createElement("button", { key: it.k, className: "row", style: { display: "block", width: "100%", textAlign: "left", background: "none", border: 0, padding: "9px 0", cursor: "pointer", color: "inherit", font: "inherit" }, onClick: it.go }, /* @__PURE__ */ React.createElement("div", { className: "row-line" }, /* @__PURE__ */ React.createElement("span", { className: "row-name" }, it.t), /* @__PURE__ */ React.createElement("span", { className: "row-amt" }, "›")), /* @__PURE__ */ React.createElement("div", { className: "sub" }, it.s))), /* @__PURE__ */ React.createElement("div", { className: "btn-row", style: { marginTop: 4 } }, /* @__PURE__ */ React.createElement("button", { className: "btn quiet", onClick: () => setSetting("checklistHidden", true) }, "Hide this"))) : null;
@@ -6471,14 +6525,7 @@ function SimpleHome(p) {
     /* @__PURE__ */ React.createElement("div", { className: "pp-val", style: untilPay == null ? { opacity: 0.5 } : null }, untilPay != null ? money(untilPay) : "\u2014"),
     /* @__PURE__ */ React.createElement("div", { className: "pp-cap" }, untilPay != null
       ? (freelance ? "safe to spend \u00b7 rest of " + monthLabel(month) : "to spend before payday")
-      : (freelance ? "safe to spend" : "to spend before payday") + " \u00b7 waiting for your bank's balance\u2026"),
-    /* @__PURE__ */ React.createElement("div", { className: "pp-row" },
-      (untilPay != null && (freelance ? flPerDay != null : perDayToPay != null && daysToPay > 0)) ? /* @__PURE__ */ React.createElement("span", { className: "pp-perday" }, "\u2248 " + money(freelance ? flPerDay : perDayToPay) + " a day") : null,
-      freelance
-        ? /* @__PURE__ */ React.createElement("span", { className: "pp-days-chip" }, /* @__PURE__ */ React.createElement("b", null, daysRemaining), daysRemaining === 1 ? "day left" : "days left")
-        : daysToPay > 0
-          ? /* @__PURE__ */ React.createElement("span", { className: "pp-days-chip" }, /* @__PURE__ */ React.createElement("b", null, daysToPay), daysToPay === 1 ? "day to payday" : "days to payday")
-          : /* @__PURE__ */ React.createElement("span", { className: "pp-days-chip" }, "payday today"))),
+      : (freelance ? "safe to spend" : "to spend before payday") + " \u00b7 waiting for your bank's balance\u2026")),
   /* @__PURE__ */ React.createElement("section", { className: "card center ask-card" + (v ? " open" : "") }, /* @__PURE__ */ React.createElement("div", { className: "eyebrow ask-title" }, /* @__PURE__ */ React.createElement(FlipWord, { verdict: v && v.verdict }), /* @__PURE__ */ React.createElement("button", { className: "info-i", "aria-label": "How this works", onClick: () => setHelpOpen(!helpOpen) }, "i")), helpOpen && /* @__PURE__ */ React.createElement("div", { className: "ask-help" }, "Type a price and pick its category — needs get more slack than fun. In My Stash checks it against your bank and goals, then answers."), /* @__PURE__ */ React.createElement("div", { className: "ask-wrap", onClick: () => { if (askRef.current) askRef.current.focus(); } }, /* @__PURE__ */ React.createElement("span", { className: "ask-ghost" }, "$", amt ? "" : "0"), /* @__PURE__ */ React.createElement("input", {
     ref: askRef,
     className: "ask-input",
@@ -6506,7 +6553,7 @@ function SimpleHome(p) {
     },
     /* @__PURE__ */ React.createElement("span", { className: "b-ic" }, b.icon),
     b.label
-  ))), cents != null && cents > 0 && !bucket && /* @__PURE__ */ React.createElement("div", { className: "hint", style: { textAlign: "center", marginTop: 8 } }, "Pick the category that fits — essentials get more slack, fun gets less."), reservedC > 0 && !v && /* @__PURE__ */ React.createElement("div", { className: "hint", style: { textAlign: "center", marginTop: 8 } }, money(reservedC), " held back for bills due later this month."), v && monthNet > 0 && cents > 0 && /* @__PURE__ */ React.createElement("div", { className: "impact" }, /* @__PURE__ */ React.createElement("div", { className: "meter " + (v.verdict === "RED" ? "crit-track" : v.verdict === "AMBER" ? "warn-track" : "") }, /* @__PURE__ */ React.createElement("i", { style: { transform: "scaleX(" + Math.max(0, Math.min(1, v.leftAfter / monthNet)).toFixed(4) + ")" } })), /* @__PURE__ */ React.createElement("div", { className: "impact-cap" }, v.leftAfter >= 0 ? "of " + money(vLeftShown) + " " + periodTail : money(-v.leftAfter) + " over " + periodTail)), v && (v.verdict !== "RED" || bucket === "emergency" || bucket === "bills") && /* @__PURE__ */ React.createElement("div", { className: "verdict-stage", key: "stage-" + v.verdict + "-" + v.reason }, v.verdict === "RED" ? /* @__PURE__ */ React.createElement(StashAnim, null) : v.verdict === "GREEN" ? /* @__PURE__ */ React.createElement(SwipeAnim, null) : /* @__PURE__ */ React.createElement(CoinAnim, null)), v && /* @__PURE__ */ React.createElement("div", { key: "vd-" + v.verdict, className: "verdict " + v.verdict.toLowerCase(), role: "status" }, /* @__PURE__ */ React.createElement("span", { className: "v-ic" }, copy.ic), /* @__PURE__ */ React.createElement("span", null, /* @__PURE__ */ React.createElement("b", null, copy.head), /* @__PURE__ */ React.createElement("span", { className: "v-sub" }, copy.sub))), v && availableNow == null && /* @__PURE__ */ React.createElement("div", { className: "hint", style: { textAlign: "center", marginTop: 8 } }, "Based on what you\u2019ve logged this month. ", /* @__PURE__ */ React.createElement("button", { className: "linklike", onClick: () => goSet("banks") }, "Connect a bank"), " for an answer from your real balance."), v && /* @__PURE__ */ React.createElement("div", { className: "btn-row", style: { justifyContent: "center", marginTop: 10 } },
+  ))), cents != null && cents > 0 && !bucket && /* @__PURE__ */ React.createElement("div", { className: "hint", style: { textAlign: "center", marginTop: 8 } }, "Pick the category that fits — essentials get more slack, fun gets less."), reservedC > 0 && !v && /* @__PURE__ */ React.createElement("div", { className: "hint", style: { textAlign: "center", marginTop: 8 } }, money(reservedC), " held back for bills due later this month."), v && vLeftShown > 0 && cents > 0 && /* @__PURE__ */ React.createElement("div", { className: "impact" }, /* @__PURE__ */ React.createElement("div", { className: "meter " + (v.verdict === "RED" ? "crit-track" : v.verdict === "AMBER" ? "warn-track" : "") }, /* @__PURE__ */ React.createElement("i", { style: { transform: "scaleX(" + Math.max(0, Math.min(1, v.leftAfter / vLeftShown)).toFixed(4) + ")" } }))), v && (v.verdict !== "RED" || bucket === "emergency" || bucket === "bills") && /* @__PURE__ */ React.createElement("div", { className: "verdict-stage", key: "stage-" + v.verdict + "-" + v.reason }, v.verdict === "RED" ? /* @__PURE__ */ React.createElement(StashAnim, null) : v.verdict === "GREEN" ? /* @__PURE__ */ React.createElement(SwipeAnim, null) : /* @__PURE__ */ React.createElement(CoinAnim, null)), v && /* @__PURE__ */ React.createElement("div", { key: "vd-" + v.verdict, className: "verdict " + v.verdict.toLowerCase(), role: "status" }, /* @__PURE__ */ React.createElement("span", { className: "v-ic" }, copy.ic), /* @__PURE__ */ React.createElement("span", null, /* @__PURE__ */ React.createElement("b", null, copy.head), /* @__PURE__ */ React.createElement("span", { className: "v-sub" }, copy.sub))), receipt, v && availableNow == null && /* @__PURE__ */ React.createElement("div", { className: "hint", style: { textAlign: "center", marginTop: 8 } }, "Based on what you\u2019ve logged this month. ", /* @__PURE__ */ React.createElement("button", { className: "linklike", onClick: () => goSet("banks") }, "Connect a bank"), " for an answer from your real balance."), v && /* @__PURE__ */ React.createElement("div", { className: "btn-row", style: { justifyContent: "center", marginTop: 10 } },
     (v.verdict === "GREEN" || v.verdict === "AMBER") && /* @__PURE__ */ React.createElement("button", { className: "btn primary", onClick: logAsk }, "Log it"),
     (v.verdict === "RED" || v.verdict === "AMBER") && /* @__PURE__ */ React.createElement("button", { className: "btn " + (v.verdict === "RED" ? "primary" : "quiet"), onClick: stashAsk }, "Stash it instead")), false), false && /* @__PURE__ */ React.createElement("div", { className: "tilerow jar-center" }, /* @__PURE__ */ React.createElement("div", { className: "minitile" }, /* @__PURE__ */ React.createElement("div", { className: "mt-label" }, "Saved up"), /* @__PURE__ */ React.createElement(AnimatedFmt0, { className: "mt-val", cents: savedTotal })), /* @__PURE__ */ React.createElement(Jar, { level: savingsLevel, size: 46, tid: "saved" }), /* @__PURE__ */ React.createElement("div", { className: "minitile" }, /* @__PURE__ */ React.createElement("div", { className: "mt-label" }, "Safety net"), /* @__PURE__ */ React.createElement("div", { className: "mt-val" }, runway === Infinity ? "\u2014" : runway.toFixed(1) + "mo"))), dataMonths.length > 1 ? null : false ? /* @__PURE__ */ React.createElement("section", { className: "card center" }, /* @__PURE__ */ React.createElement("div", { className: "empty" }, /* @__PURE__ */ React.createElement("span", { className: "e-ic" }, "\u{1F4B5}"), "Tap ", /* @__PURE__ */ React.createElement("b", null, "+"), " and log your first deposit.")) : null, checklistCard);
 }
